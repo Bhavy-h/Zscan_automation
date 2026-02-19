@@ -54,37 +54,47 @@ def process_and_plot(file_content, file_name):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=300)
     buf.seek(0)
+    
+    # Close the figure to free up memory (important when looping multiple files)
+    plt.close(fig)
     return buf
 
 # --- Streamlit Dashboard UI ---
 st.set_page_config(page_title="Z-Scan Data Plotter", layout="centered")
 
 st.title("Z-Scan Data Plotter")
-st.write("Upload your data file (LabVIEW or comma-separated) to generate and download the plot.")
+st.write("Upload your data files (LabVIEW or comma-separated) to generate and download the plots.")
 
-# File Uploader - Now accepts general text/csv extensions
-uploaded_file = st.file_uploader("Choose a data file", type=["txt", "csv", "dat"])
+# File Uploader - Now accepts multiple files
+uploaded_files = st.file_uploader("Choose data files", type=["txt", "csv", "dat"], accept_multiple_files=True)
 
-if uploaded_file is not None:
-    file_name = uploaded_file.name
-    file_content = uploaded_file.read()
+if uploaded_files:
+    st.success(f"{len(uploaded_files)} file(s) uploaded successfully!")
     
-    try:
-        # Process the file and generate the plot buffer
-        image_buffer = process_and_plot(file_content, file_name)
+    # Loop through the list of uploaded files
+    for i, uploaded_file in enumerate(uploaded_files):
+        file_name = uploaded_file.name
+        file_content = uploaded_file.read()
         
-        st.success("Plot generated successfully!")
+        st.subheader(f"Plot for: {file_name}")
         
-        # Display a preview of the plot on the dashboard
-        st.image(image_buffer, caption="Preview of your plot", use_container_width=True)
-        
-        # Provide the download button
-        st.download_button(
-            label="Download Plot as PNG",
-            data=image_buffer,
-            file_name=f"{file_name.split('.')[0]}_plot.png",
-            mime="image/png"
-        )
-    except Exception as e:
-        st.error(f"An error occurred while processing the file: {e}")
-        st.write("Please ensure the uploaded file matches one of the expected formats.")
+        try:
+            # Process the file and generate the plot buffer
+            image_buffer = process_and_plot(file_content, file_name)
+            
+            # Display a preview of the plot on the dashboard
+            st.image(image_buffer, use_container_width=True)
+            
+            # Provide the download button (Note the unique 'key' required for buttons in a loop)
+            st.download_button(
+                label=f"Download {file_name} Plot",
+                data=image_buffer,
+                file_name=f"{file_name.split('.')[0]}_plot.png",
+                mime="image/png",
+                key=f"download_btn_{i}"
+            )
+        except Exception as e:
+            st.error(f"An error occurred while processing {file_name}: {e}")
+            
+        # Add a visual divider between files
+        st.markdown("---")
