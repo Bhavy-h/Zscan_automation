@@ -6,23 +6,38 @@ def process_and_plot(file_content, file_name):
     # Decode the uploaded file bytes into readable strings
     lines = file_content.decode('utf-8').splitlines()
     
-    # Locate the data rows by finding the second End_of_Header marker
-    header_count = 0
-    data_start_idx = 0
-    for i, line in enumerate(lines):
-        if "***End_of_Header***" in line:
-            header_count += 1
-            if header_count == 2:
-                data_start_idx = i + 2 
-                break
+    distances = []
+    voltages = []
+    
+    # 1. Check if the file is the LabVIEW format with "***End_of_Header***"
+    if any("***End_of_Header***" in line for line in lines):
+        header_count = 0
+        data_start_idx = 0
+        for i, line in enumerate(lines):
+            if "***End_of_Header***" in line:
+                header_count += 1
+                if header_count == 2:
+                    data_start_idx = i + 2 
+                    break
 
-    # Extract the distance and voltage lines
-    x_data_line = lines[data_start_idx].strip().split('\t')
-    y_data_line = lines[data_start_idx + 1].strip().split('\t')
+        x_data_line = lines[data_start_idx].strip().split('\t')
+        y_data_line = lines[data_start_idx + 1].strip().split('\t')
 
-    # Convert the extracted strings to floats, ignoring empty strings
-    distances = [float(val) for val in x_data_line if val.strip()]
-    voltages = [float(val) for val in y_data_line if val.strip()]
+        distances = [float(val) for val in x_data_line if val.strip()]
+        voltages = [float(val) for val in y_data_line if val.strip()]
+        
+    # 2. Otherwise, treat it as the simple vertical comma-separated format
+    else:
+        for line in lines:
+            if line.strip(): # Skip completely empty lines
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    try:
+                        distances.append(float(parts[0].strip()))
+                        voltages.append(float(parts[1].strip()))
+                    except ValueError:
+                        # Skip lines that contain non-numeric text
+                        continue
 
     # Create the plot
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -45,10 +60,10 @@ def process_and_plot(file_content, file_name):
 st.set_page_config(page_title="Z-Scan Data Plotter", layout="centered")
 
 st.title("Z-Scan Data Plotter")
-st.write("Upload your LabVIEW output text file to generate and download the plot.")
+st.write("Upload your data file (LabVIEW or comma-separated) to generate and download the plot.")
 
-# File Uploader
-uploaded_file = st.file_uploader("Choose a .txt file", type=["txt"])
+# File Uploader - Now accepts general text/csv extensions
+uploaded_file = st.file_uploader("Choose a data file", type=["txt", "csv", "dat"])
 
 if uploaded_file is not None:
     file_name = uploaded_file.name
@@ -72,4 +87,4 @@ if uploaded_file is not None:
         )
     except Exception as e:
         st.error(f"An error occurred while processing the file: {e}")
-        st.write("Please ensure the uploaded file matches the expected LabVIEW format.")
+        st.write("Please ensure the uploaded file matches one of the expected formats.")
