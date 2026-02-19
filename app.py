@@ -37,7 +37,6 @@ def process_and_plot(file_content, file_name):
                         distances.append(float(parts[0].strip()))
                         voltages.append(float(parts[1].strip()))
                     except ValueError:
-                        # Skip lines that contain non-numeric text
                         continue
 
     # Create the plot
@@ -61,12 +60,13 @@ def process_and_plot(file_content, file_name):
     return buf
 
 # --- Streamlit Dashboard UI ---
-st.set_page_config(page_title="Z-Scan Data Plotter", layout="centered")
+# Changed layout to 'wide' so the tabs have more room to breathe
+st.set_page_config(page_title="Z-Scan Data Plotter", layout="wide")
 
 st.title("Z-Scan Data Plotter")
 st.write("Upload your data files (LabVIEW or comma-separated) to generate and download the plots.")
 
-# File Uploader - Accepts multiple files
+# File Uploader
 uploaded_files = st.file_uploader("Choose data files", type=["txt", "csv", "dat"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -75,51 +75,56 @@ if uploaded_files:
     # Create an in-memory buffer to hold the ZIP file
     zip_buffer = io.BytesIO()
     
+    # Dynamically create a list of tabs based on the file names
+    tab_names = [file.name for file in uploaded_files]
+    tabs = st.tabs(tab_names)
+    
     # Open the ZIP file in write mode
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         
-        # Loop through the list of uploaded files
-        for i, uploaded_file in enumerate(uploaded_files):
+        # Loop through the files AND the generated tabs simultaneously
+        for i, (uploaded_file, tab) in enumerate(zip(uploaded_files, tabs)):
             file_name = uploaded_file.name
             file_content = uploaded_file.read()
-            
-            st.subheader(f"Plot for: {file_name}")
             
             try:
                 # Process the file and generate the plot buffer
                 image_buffer = process_and_plot(file_content, file_name)
                 
-                # Display a preview of the plot on the dashboard
-                st.image(image_buffer, use_container_width=True)
+                # --- Everything indented under 'with tab:' goes inside that specific tab ---
+                with tab:
+                    st.subheader(f"Plot Preview")
+                    
+                    # Display the plot inside the tab
+                    st.image(image_buffer, use_container_width=True)
+                    
+                    # Provide the individual download button inside the tab
+                    png_filename = f"{file_name.split('.')[0]}_plot.png"
+                    st.download_button(
+                        label=f"Download {file_name} Plot",
+                        data=image_buffer,
+                        file_name=png_filename,
+                        mime="image/png",
+                        key=f"download_btn_{i}"
+                    )
                 
-                # Provide the individual download button
-                png_filename = f"{file_name.split('.')[0]}_plot.png"
-                st.download_button(
-                    label=f"Download {file_name} Plot",
-                    data=image_buffer,
-                    file_name=png_filename,
-                    mime="image/png",
-                    key=f"download_btn_{i}"
-                )
-                
-                # Write the PNG buffer directly into our ZIP file
+                # Write the PNG buffer directly into our ZIP file (happens in the background)
                 zip_file.writestr(png_filename, image_buffer.getvalue())
                 
             except Exception as e:
-                st.error(f"An error occurred while processing {file_name}: {e}")
-                
-            # Add a visual divider between files
-            st.markdown("---")
+                with tab:
+                    st.error(f"An error occurred while processing {file_name}: {e}")
             
     # Move the ZIP buffer's pointer to the beginning so it can be downloaded
     zip_buffer.seek(0)
     
-    # Provide the master "Download All" button at the bottom
+    # Provide the master "Download All" button outside of the tabs (at the bottom)
+    st.markdown("---")
     st.markdown("### 📦 Download All Plots")
     st.download_button(
         label="Download All Plots as ZIP",
         data=zip_buffer,
         file_name="all_zscan_plots.zip",
         mime="application/zip",
-        type="primary"  # This makes the button stand out with a solid background color
+        type="primary"
     )
