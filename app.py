@@ -2,6 +2,8 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import io
 import zipfile
+import numpy as np
+from scipy.signal import savgol_filter
 
 def process_and_plot(file_content, file_name):
     lines = file_content.decode('utf-8').splitlines()
@@ -35,13 +37,41 @@ def process_and_plot(file_content, file_name):
                     except ValueError:
                         continue
 
+    # Convert to numpy arrays for math operations
+    dist_arr = np.array(distances)
+    volt_arr = np.array(voltages)
+    
+    # Sort the data by distance just in case it was recorded out of order
+    sort_indices = np.argsort(dist_arr)
+    dist_arr = dist_arr[sort_indices]
+    volt_arr = volt_arr[sort_indices]
+
+    # --- Apply Savitzky-Golay smoothing filter ---
+    # Window length must be an odd number. We'll use 11 as a standard default.
+    window_len = min(11, len(dist_arr) - (0 if len(dist_arr) % 2 != 0 else 1))
+    if window_len < 3: 
+        window_len = 3 
+        
+    try:
+        smoothed_voltages = savgol_filter(volt_arr, window_length=window_len, polyorder=3)
+    except Exception:
+        # Fallback to raw data if filtering fails (e.g., not enough data points)
+        smoothed_voltages = volt_arr
+
+    # Create the plot
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(distances, voltages, marker='o', linestyle='-', color='b', markersize=4)
+    
+    # Plot raw data as faint background dots
+    ax.plot(dist_arr, volt_arr, marker='o', linestyle='', color='gray', markersize=4, alpha=0.4, label='Raw Data')
+    
+    # Plot the smoothed curve on top
+    ax.plot(dist_arr, smoothed_voltages, linestyle='-', color='blue', linewidth=2, label='Smoothed Curve')
     
     ax.set_title(f'Z-Scan Measurement: {file_name}')
     ax.set_xlabel('Distance (mm)') 
     ax.set_ylabel('Voltage (V)')
     ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend()
     fig.tight_layout()
     
     buf = io.BytesIO()
@@ -78,12 +108,9 @@ if uploaded_files:
                 with tab:
                     st.subheader(f"Plot Preview")
                     
-                    # --- NEW: Use columns to center and reduce the size of the plot ---
-                    # This creates 3 columns. The middle one is 2x wider than the edges.
                     left_col, mid_col, right_col = st.columns([1, 2, 1])
                     
                     with mid_col:
-                        # The image is now constrained to the width of 'mid_col'
                         st.image(image_buffer, use_container_width=True)
                         
                         png_filename = f"{file_name.split('.')[0]}_plot.png"
