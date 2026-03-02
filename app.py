@@ -5,11 +5,12 @@ import zipfile
 import numpy as np
 from scipy.signal import savgol_filter
 
-def process_and_plot(file_content, file_name):
+def process_and_plot(file_content, file_name, params):
     lines = file_content.decode('utf-8').splitlines()
     distances = []
     voltages = []
     
+    # 1. Parse Data
     if any("***End_of_Header***" in line for line in lines):
         header_count = 0
         data_start_idx = 0
@@ -37,39 +38,48 @@ def process_and_plot(file_content, file_name):
                     except ValueError:
                         continue
 
-    # Convert to numpy arrays for math operations
     dist_arr = np.array(distances)
     volt_arr = np.array(voltages)
     
-    # Sort the data by distance just in case it was recorded out of order
     sort_indices = np.argsort(dist_arr)
     dist_arr = dist_arr[sort_indices]
     volt_arr = volt_arr[sort_indices]
 
-    # --- Apply Savitzky-Golay smoothing filter ---
-    # Window length must be an odd number. We'll use 11 as a standard default.
+    # --- NEW: Normalization and Math ---
+    # Normalize voltage to Transmittance (T) by using the first 5% and last 5% of points as the baseline (linear region)
+    edge_points = max(3, int(len(volt_arr) * 0.05))
+    baseline_v = (np.mean(volt_arr[:edge_points]) + np.mean(volt_arr[-edge_points:])) / 2
+    normalized_t = volt_arr / baseline_v
+
     window_len = min(11, len(dist_arr) - (0 if len(dist_arr) % 2 != 0 else 1))
-    if window_len < 3: 
-        window_len = 3 
+    if window_len < 3: window_len = 3 
         
     try:
-        smoothed_voltages = savgol_filter(volt_arr, window_length=window_len, polyorder=3)
+        smoothed_t = savgol_filter(normalized_t, window_length=window_len, polyorder=3)
     except Exception:
-        # Fallback to raw data if filtering fails (e.g., not enough data points)
-        smoothed_voltages = volt_arr
+        smoothed_t = normalized_t
 
-    # Create the plot
+    # Extract Peak-to-Valley difference from the smoothed curve to avoid noise spikes
+    delta_t = np.max(smoothed_t) - np.min(smoothed_t)
+
+    # Convert parameters to standard scientific units (cm, Joules, seconds)
+    wavelength_cm = params['wavelength'] * 1e-7
+    energy_j = params['energy'] * 1e-9
+    pulse_s = params['pulse'] * 1e-15
+    w0_cm = params['waist'] * 1e-4
+
+    # Calculate Peak Intensity (I0) and Nonlinear Refractive Index (n2)
+    i0 = energy_j / (np.pi * (w0_cm**2) * pulse_s)
+    n2 = (delta_t * wavelength_cm) / (0.203 * 2 * np.pi * i0)
+
+    # --- Plotting ---
     fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(dist_arr, normalized_t, marker='o', linestyle='', color='gray', markersize=4, alpha=0.4, label='Raw Data')
+    ax.plot(dist_arr, smoothed_t, linestyle='-', color='blue', linewidth=2, label='Smoothed Curve')
     
-    # Plot raw data as faint background dots
-    ax.plot(dist_arr, volt_arr, marker='o', linestyle='', color='gray', markersize=4, alpha=0.4, label='Raw Data')
-    
-    # Plot the smoothed curve on top
-    ax.plot(dist_arr, smoothed_voltages, linestyle='-', color='blue', linewidth=2, label='Smoothed Curve')
-    
-    ax.set_title(f'Z-Scan Measurement: {file_name}')
+    ax.set_title(f'Normalized Z-Scan Measurement: {file_name}')
     ax.set_xlabel('Distance (mm)') 
-    ax.set_ylabel('Voltage (V)')
+    ax.set_ylabel('Normalized Transmittance')
     ax.grid(True, linestyle='--', alpha=0.7)
     ax.legend()
     fig.tight_layout()
@@ -77,52 +87,67 @@ def process_and_plot(file_content, file_name):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=300)
     buf.seek(0)
-    
     plt.close(fig)
-    return buf
+    
+    # Return a dictionary containing the plot and the calculated metrics
+    return {"buffer": buf, "delta_t": delta_t, "i0": i0, "n2": n2}
 
 # --- Streamlit Dashboard UI ---
 st.set_page_config(page_title="Z-Scan Data Plotter", layout="wide")
 
-st.title("Z-Scan Data Plotter")
-st.write("Upload your data files (LabVIEW or comma-separated) to generate and download the plots.")
+st.title("Z-Scan Data Plotter & Analyzer")
+
+# --- NEW: Sidebar for Laser Parameters ---
+st.sidebar.header("Laser Parameters")
+st.sidebar.write("Adjust these to match your experimental setup.")
+
+# Default values are pulled directly from your legacy MATLAB scripts
+params = {
+    "wavelength": st.sidebar.number_input("Wavelength (nm)", value=780.0, step=1.0),
+    "energy": st.sidebar.number_input("Pulse Energy (nJ)", value=0.8, step=0.1, format="%.2f"),
+    "pulse": st.sidebar.number_input("Pulse FWHM (fs)", value=100.0, step=1.0),
+    "waist": st.sidebar.number_input("Beam Waist w0 (µm)", value=18.0, step=1.0)
+}
 
 uploaded_files = st.file_uploader("Choose data files", type=["txt", "csv", "dat"], accept_multiple_files=True)
 
 if uploaded_files:
-    st.success(f"{len(uploaded_files)} file(s) uploaded successfully!")
-    
     zip_buffer = io.BytesIO()
     tab_names = [file.name for file in uploaded_files]
     tabs = st.tabs(tab_names)
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        
         for i, (uploaded_file, tab) in enumerate(zip(uploaded_files, tabs)):
             file_name = uploaded_file.name
             file_content = uploaded_file.read()
             
             try:
-                image_buffer = process_and_plot(file_content, file_name)
+                # Pass the parameters dictionary to the processing function
+                result = process_and_plot(file_content, file_name, params)
                 
                 with tab:
-                    st.subheader(f"Plot Preview")
+                    # --- NEW: Display the calculated metrics beautifully ---
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("ΔT (Peak-to-Valley)", f"{result['delta_t']:.4f}")
+                    m2.metric("Peak Intensity (I0)", f"{result['i0']:.2e} W/cm²")
+                    m3.metric("n2 Coefficient", f"{result['n2']:.4e} cm²/W")
                     
+                    st.divider()
+                    
+                    # Display the plot
                     left_col, mid_col, right_col = st.columns([1, 2, 1])
-                    
                     with mid_col:
-                        st.image(image_buffer, use_container_width=True)
-                        
+                        st.image(result['buffer'], use_container_width=True)
                         png_filename = f"{file_name.split('.')[0]}_plot.png"
                         st.download_button(
                             label=f"Download {file_name} Plot",
-                            data=image_buffer,
+                            data=result['buffer'],
                             file_name=png_filename,
                             mime="image/png",
                             key=f"download_btn_{i}"
                         )
                 
-                zip_file.writestr(png_filename, image_buffer.getvalue())
+                zip_file.writestr(png_filename, result['buffer'].getvalue())
                 
             except Exception as e:
                 with tab:
