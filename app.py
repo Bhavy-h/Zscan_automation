@@ -9,6 +9,7 @@ from scipy.optimize import minimize
 
 def oa_sheik_bahae(z, q00, z_shift, z0):
     """Equation 6 summation for Open Aperture"""
+    if z0 == 0: z0 = 1e-10 # Prevent division by zero during scipy minimization
     q0_z = q00 / (1 + ((z - z_shift) / z0)**2)
     T = np.zeros_like(z)
     for m in range(16): # Sum from m=0 to 15
@@ -18,13 +19,19 @@ def oa_sheik_bahae(z, q00, z_shift, z0):
 
 def ca_sheik_bahae(z, dPhi0, z_shift, baseline, z0_calc):
     """Standard CA equation for small phase shift"""
+    if z0_calc == 0: z0_calc = 1e-10
     x = (z - z_shift) / z0_calc
     return baseline + (4 * dPhi0 * x) / (((x**2) + 9) * ((x**2) + 1))
 
 # --- Main Processing Function ---
 
 def process_and_plot(file_content, file_name, params, mode):
-    lines = file_content.decode('utf-8').splitlines()
+    # Fallback decoding for older lab equipment files
+    try:
+        lines = file_content.decode('utf-8').splitlines()
+    except UnicodeDecodeError:
+        lines = file_content.decode('latin-1').splitlines()
+        
     distances = []
     voltages = []
     
@@ -45,13 +52,19 @@ def process_and_plot(file_content, file_name, params, mode):
     else:
         for line in lines:
             if line.strip(): 
-                parts = line.split(',')
+                # Robustly handle commas, tabs, and spaces
+                clean_line = line.replace(',', ' ').replace('\t', ' ')
+                parts = clean_line.split()
                 if len(parts) >= 2:
                     try:
                         distances.append(float(parts[0].strip()))
                         voltages.append(float(parts[1].strip()))
                     except ValueError:
                         continue
+
+    # Catch empty arrays before they crash the math functions
+    if len(distances) == 0:
+        raise ValueError("Could not extract any numerical data. Please verify the file formatting.")
 
     raw_z_mm = np.array(distances)
     volt_arr = np.array(voltages)
@@ -60,7 +73,7 @@ def process_and_plot(file_content, file_name, params, mode):
     raw_z_mm = raw_z_mm[sort_indices]
     volt_arr = volt_arr[sort_indices]
 
-    # 2. Baseline Normalization (using the outer edges)
+    # 2. Baseline Normalization
     edge_points = max(5, int(len(volt_arr) * 0.1))
     baseline_v = (np.mean(volt_arr[:edge_points]) + np.mean(volt_arr[-edge_points:])) / 2
     data_norm = volt_arr / baseline_v
@@ -73,7 +86,7 @@ def process_and_plot(file_content, file_name, params, mode):
     energy_j = params['energy'] * 1e-9
     pulse_s = params['pulse'] * 1e-15
     focal_cm = params['focal']
-    diam_cm = params['waist'] * 1e-4  # Using waist input as beam diameter/waist on lens
+    diam_cm = params['waist'] * 1e-4 
     L_cm = params['thickness'] * 1e-1
     S = params['aperture_S']
 
@@ -87,32 +100,28 @@ def process_and_plot(file_content, file_name, params, mode):
     z_smooth_cm = np.linspace(np.min(z_cm), np.max(z_cm), 1000)
     
     if mode == "Open Aperture (β)":
-        # Guess initial Z-shift by finding the valley
         idx_min = np.argmin(data_norm)
         z_shift_guess = z_cm[idx_min]
         
-        # Initial guess: [q00, z_shift, z0]
         initial_guess = [0.1, z_shift_guess, z0_calc]
         
-        # SSE Objective Function
         def sse_oa(p):
             return np.sum((data_norm - oa_sheik_bahae(z_cm, p[0], p[1], p[2]))**2)
             
         res = minimize(sse_oa, initial_guess, method='Nelder-Mead', options={'maxiter': 2000})
         q00_fit, z_shift_fit, z0_fit = res.x
         
-        # Calculate Beta
         coeff = q00_fit / (I0 * Leff)
         coeff_name = "β (cm/W)"
         phenomenon = "Saturable / Reverse Absorption"
         
         T_fit = oa_sheik_bahae(z_smooth_cm, q00_fit, z_shift_fit, z0_fit)
         
-    else: # Closed Aperture
-        # Guess initial Z-shift by finding midway between peak and valley
-        z_shift_guess = (z_cm[np.argmax(data_norm)] + z_cm[np.argmin(data_norm)]) / 2.0
+    else: 
+        idx_max = np.argmax(data_norm)
+        idx_min = np.argmin(data_norm)
+        z_shift_guess = (z_cm[idx_max] + z_cm[idx_min]) / 2.0
         
-        # Initial guess: [dPhi0, z_shift, baseline]
         initial_guess = [0.5, z_shift_guess, 1.0]
         
         def sse_ca(p):
@@ -123,16 +132,13 @@ def process_and_plot(file_content, file_name, params, mode):
         
         T_fit = ca_sheik_bahae(z_smooth_cm, dPhi0_fit, z_shift_fit, baseline_fit, z0_calc)
         
-        # Find peak and valley from the theoretical fit
         T_peak = np.max(T_fit)
         T_valley = np.min(T_fit)
         delta_T_pv = T_peak - T_valley
         
-        # Eq 8 Calculation
         k = (2 * np.pi) / lambda_cm
         coeff = delta_T_pv / (0.406 * (1 - S)**0.25 * k * I0 * Leff)
         
-        # Determine Sign
         if z_smooth_cm[np.argmin(T_fit)] < z_smooth_cm[np.argmax(T_fit)]:
             sign_n2 = 1
             phenomenon = "Self-Focusing (+n₂)"
@@ -143,13 +149,10 @@ def process_and_plot(file_content, file_name, params, mode):
         coeff = coeff * sign_n2
         coeff_name = "n₂ (cm²/W)"
 
-    # 5. Plotting (Matched to MATLAB script aesthetics)
+    # 5. Plotting
     fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
     
-    # Plot raw data (Hollow maroon circles)
     ax.plot(z_cm * 10, data_norm, 'o', markersize=8, markeredgecolor='#801A1A', markerfacecolor='none', markeredgewidth=1.5, label='Experimental Data')
-    
-    # Plot Theoretical Fit (Solid dark blue line)
     ax.plot(z_smooth_cm * 10, T_fit, '-', color='#000066', linewidth=2.5, label='Sheik-Bahae Fit')
     
     ax.set_title(f'Theoretical Fit: {file_name}', fontweight='bold')
@@ -159,7 +162,6 @@ def process_and_plot(file_content, file_name, params, mode):
     y_margin = (np.max(data_norm) - np.min(data_norm)) * 0.1
     ax.set_ylim([np.min(data_norm) - y_margin, np.max(data_norm) + y_margin])
     
-    # MATLAB-style axis formatting
     ax.tick_params(direction='in', length=6, width=1.2, which='major', top=True, right=True)
     ax.minorticks_on()
     ax.tick_params(direction='in', length=3, width=1, which='minor', top=True, right=True)
@@ -174,7 +176,6 @@ def process_and_plot(file_content, file_name, params, mode):
     buf.seek(0)
     plt.close(fig)
     
-    # Return metrics
     results = {"buffer": buf, "i0": I0, "coeff": coeff, "coeff_name": coeff_name, "phenomenon": phenomenon, "z0_calc": z0_calc}
     if mode == "Open Aperture (β)":
         results["z0_fit"] = z0_fit
@@ -200,7 +201,7 @@ params = {
     "energy": st.sidebar.number_input("Pulse Energy (nJ)", value=2.1, step=0.1, format="%.2f"),
     "pulse": st.sidebar.number_input("Pulse FWHM (fs)", value=150.0, step=1.0),
     "focal": st.sidebar.number_input("Lens Focal Length (cm)", value=20.0, step=0.5),
-    "waist": st.sidebar.number_input("Beam Diam. on lens (µm)", value=5000.0, step=10.0), # 0.5 cm
+    "waist": st.sidebar.number_input("Beam Diam. on lens (µm)", value=5000.0, step=10.0), 
     "thickness": st.sidebar.number_input("Sample Thickness (mm)", value=1.0, step=0.1)
 }
 
@@ -208,7 +209,7 @@ if analysis_mode == "Closed Aperture (n2)":
     st.sidebar.header("3. Aperture Settings")
     params["aperture_S"] = st.sidebar.number_input("Aperture Transmittance (S)", value=0.3, min_value=0.01, max_value=0.99, step=0.05)
 else:
-    params["aperture_S"] = 1.0 # Ignored for OA
+    params["aperture_S"] = 1.0 
 
 # --- Main Uploader ---
 uploaded_files = st.file_uploader("Upload LabVIEW (.txt) or CSV data", type=["txt", "csv", "dat"], accept_multiple_files=True)
@@ -228,7 +229,6 @@ if uploaded_files:
                 with tab:
                     st.markdown(f"**Observed Phenomenon:** `{result['phenomenon']}`")
                     
-                    # Display appropriate metrics based on the mode
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Peak Intensity (I₀)", f"{result['i0']:.2e} W/cm²")
                     m2.metric(result['coeff_name'], f"{result['coeff']:.4e}")
